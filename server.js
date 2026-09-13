@@ -426,6 +426,36 @@ function record(modelId, info) {
   saveMeta();
 }
 
+// ---------- usage 归一化（缓存命中观测） ----------
+// 上游 usage 字段命名不统一：OpenAI 风格 prompt_tokens_details.cached_tokens、
+// DeepSeek 风格 prompt_cache_hit_tokens、Anthropic 风格 cache_read_input_tokens 等，统一成 { prompt, completion, cached }
+const pickNum = (...vals) => { for (const v of vals) if (typeof v === 'number' && Number.isFinite(v)) return v; return null; };
+function extractUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
+  const u = {
+    prompt: pickNum(usage.prompt_tokens, usage.input_tokens),
+    completion: pickNum(usage.completion_tokens, usage.output_tokens),
+    cached: pickNum(details.cached_tokens, usage.cached_tokens, usage.prompt_cache_hit_tokens, usage.cache_read_input_tokens),
+  };
+  return u.prompt == null && u.completion == null && u.cached == null ? null : u;
+}
+
+// 流式 usage 只在客户端请求 stream_options.include_usage 时出现在最后一个 data 块（[DONE] 之前）
+function usageFromSSE(text) {
+  const lines = String(text).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].startsWith('data:')) continue;
+    const payload = lines[i].slice(5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    try {
+      const u = extractUsage(JSON.parse(payload)?.usage);
+      if (u) return u;
+    } catch { /* 跨块的不完整行跳过 */ }
+  }
+  return null;
+}
+
 // ---------- 聊天代理 ----------
 const CHAT_PATHS = new Set(['/chat/completions', '/v1/chat/completions', '/api/v1/chat/completions']);
 
@@ -662,6 +692,9 @@ async function handleChat(req, res) {
   const cfg = config.perModel[modelId] || {};
   const targets = buildAttempts(modelId, cfg).map((a) => a.upstream).filter(Boolean);
   const isStream = !!body.stream;
+  // 流式 usage 是缓存观测的唯一来源；第三方客户端通常不带 stream_options.include_usage，这里统一向上游补上。
+  // 上游返回的标准 usage 尾块（choices 为空）照常透传，按正常 OpenAI 流处理即可。
+  if (isStream) body.stream_options = { ...(body.stream_options || {}), include_usage: true };
 
   const chain = await runChatChain(req, body, modelId, cfg, { stream: isStream });
 
@@ -685,7 +718,8 @@ async function handleChat(req, res) {
     const tap = new Transform({
       transform(c, enc, cb) { buf.push(c); cb(null, c); },
       flush(cb) {
-        const text = Buffer.concat(buf).toString('utf8');
+        // 首块在探测阶段已被读出并先行下发，解析时要拼回，否则短响应（整体落在首块）解析不到
+        const text = (chain.streamHead ? Buffer.from(chain.streamHead).toString('utf8') : '') + Buffer.concat(buf).toString('utf8');
         let provider = null, canonical = null;
         // direct 管道：最后一个 chunk 顶层带 provider（显示名）与 model
         const lines = text.split('\n');
@@ -704,7 +738,8 @@ async function handleChat(req, res) {
           provider = fp ? fp[1] : null;
           canonical = cs ? cs[1] : null;
         }
-        record(modelId, { provider, canonical, ms: Date.now() - t0, stream: true, error: null, account: acc.name, attempts: chain.trace.map((t) => t.upstream || 'auto') });
+        const usage = usageFromSSE(text);
+        record(modelId, { provider, canonical, ms: Date.now() - t0, stream: true, error: null, account: acc.name, attempts: chain.trace.map((t) => t.upstream || 'auto'), ...(usage ? { usage } : {}) });
         cb();
       },
     });
@@ -719,6 +754,7 @@ async function handleChat(req, res) {
     config.knownModels.push(modelId);
     saveConfig();
   }
+  const usage = extractUsage(out?.usage);
   record(modelId, {
     provider: routing.finalProvider || null,
     canonical: routing.canonicalSlug || null,
@@ -728,6 +764,7 @@ async function handleChat(req, res) {
     trace: chain.trace,
     error: status !== 200 ? out?.error?.message || null : null,
     account: acc ? acc.name : null,
+    ...(usage ? { usage } : {}),
   });
   res.writeHead(status, {
     'Content-Type': 'application/json',

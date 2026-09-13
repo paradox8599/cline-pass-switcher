@@ -189,10 +189,10 @@
   </div>
 
   <div class="card">
-    <h2>请求历史（最近 100 条，经代理的请求自动记录）</h2>
+    <h2>请求历史（最近 100 条，经代理的请求自动记录）<span id="histCacheSummary" class="dim" style="font-size:13px;font-weight:normal"></span></h2>
     <table>
-      <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>实际上游</th><th>背后模型</th><th>耗时</th><th>方式</th><th>尝试序列</th></tr></thead>
-      <tbody id="histBody"><tr><td colspan="7" class="empty">暂无记录</td></tr></tbody>
+      <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>实际上游</th><th>背后模型</th><th>缓存</th><th>耗时</th><th>方式</th><th>尝试序列</th></tr></thead>
+      <tbody id="histBody"><tr><td colspan="9" class="empty">暂无记录</td></tr></tbody>
     </table>
   </div>
 
@@ -651,17 +651,36 @@ function bulkUp(id, action) {
   }
 }
 
+const fmtTok = (n) => (n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n));
+
+function histCacheCell(u) {
+  if (!u || u.prompt == null) return '<span class="dim">—</span>';
+  const title = `cached ${u.cached ?? 0} / prompt ${u.prompt}`;
+  if (u.cached == null) return `<span class="dim" title="${title}">${fmtTok(u.prompt)} tok</span>`;
+  const rate = Math.round((u.cached / Math.max(1, u.prompt)) * 100);
+  return rate > 0
+    ? `<span class="badge green" title="${title}">${fmtTok(u.cached)}/${fmtTok(u.prompt)} · ${rate}%</span>`
+    : `<span class="badge orange" title="${title}">0%</span>`;
+}
+
 async function loadHistory() {
   const { history } = await api('/api/history');
+  const withUsage = history.filter((h) => h.usage && h.usage.prompt);
+  const sumPrompt = withUsage.reduce((s, h) => s + h.usage.prompt, 0);
+  const sumCached = withUsage.reduce((s, h) => s + (h.usage.cached || 0), 0);
+  $('#histCacheSummary').textContent = withUsage.length
+    ? `　缓存命中：最近 ${withUsage.length} 条有 usage 的记录合计 ${Math.round((sumCached / Math.max(1, sumPrompt)) * 100)}%（${fmtTok(sumCached)}/${fmtTok(sumPrompt)} tokens）`
+    : '';
   $('#histBody').innerHTML = history.length ? history.map((h) => `<tr>
       <td>${fmt(h.ts)}</td><td class="mono">${h.model}</td>
       <td>${h.account ? '<span class="badge">' + h.account + '</span>' : '<span class="dim">—</span>'}</td>
       <td>${h.provider ? '<span class="badge">' + h.provider + '</span>' : '<span class="dim">—</span>'}</td>
       <td class="mono dim">${h.canonical || '—'}</td>
+      <td>${histCacheCell(h.usage)}</td>
       <td>${h.ms ?? '—'} ms</td>
       <td>${h.stream ? '流式' : '非流式'}</td>
       <td class="dim">${(h.trace || h.attempts || []).map((t) => typeof t === 'string' ? t : `${t.upstream || 'auto'}(${t.status === 200 ? '✔' : '✗'}${t.ms}ms)`).join(' → ') || '—'}</td>
-    </tr>`).join('') : '<tr><td colspan="8" class="empty">暂无记录 —— 把客户端 Base URL 指向代理地址即可自动记录</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="9" class="empty">暂无记录 —— 把客户端 Base URL 指向代理地址即可自动记录</td></tr>';
 }
 
 let ACCS = null;

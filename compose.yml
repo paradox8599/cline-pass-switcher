@@ -1,0 +1,22 @@
+# 单容器部署：只跑 cline-pass-switcher 本体，TLS 由宿主机上独立运行的 Caddy 处理
+# （反代到 127.0.0.1:3123）。
+#
+# 前置：podman network create llm-net   # 与其它容器（如 new-api）互通的共享网络
+# 启动：podman compose up -d --build
+services:
+  cline-pass-console:
+    build: .
+    container_name: cline-pass-console
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+    ports:
+      - "3123:3123"
+    networks:
+      - llm-net
+
+networks:
+  llm-net:
+    external: true

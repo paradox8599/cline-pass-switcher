@@ -43,7 +43,7 @@ Model:    cline-pass/glm-5.2 等
 
 ---
 
-## Docker 部署
+## Docker / Podman 部署
 
 ### 方式 A：All-in-one（自带 Caddy 自动 HTTPS，推荐新手）
 
@@ -60,9 +60,16 @@ docker compose -f deploy/docker-compose.all-in-one.yml up -d --build
 
 访问 `https://你的域名/`（或 `https://服务器IP/`），控制台里设置代理密钥即可对外提供服务。
 
-### 方式 B：已有一个性化反代（nginx 门户等）
+### 方式 B：已有反代 / 需与同机其它容器互通
 
-根目录的 `docker-compose.yml` 只启动应用并绑定 `127.0.0.1:3123`，由你现有的 nginx/Caddy 做 TLS：
+根目录的 `compose.yml` 只启动应用本体并绑定 `127.0.0.1:3123`，TLS 交给宿主机上已有的 nginx/Caddy：
+
+```bash
+podman network create llm-net        # 外部共享网络（Docker 用 docker network create llm-net）
+podman compose up -d --build
+```
+
+应用容器加入 `llm-net` 后，同机其它容器（如 new-api）可用 `http://cline-pass-console:3123` 走容器内网直连，不经反代。反代示例：
 
 ```nginx
 location / {
